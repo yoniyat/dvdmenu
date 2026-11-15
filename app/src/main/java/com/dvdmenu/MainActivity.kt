@@ -13,7 +13,9 @@ import android.graphics.Paint as APaint
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
+import android.provider.OpenableColumns
 import android.util.Size as ASize
+import android.webkit.WebView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -31,6 +33,9 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
@@ -41,6 +46,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.CornerRadius
@@ -56,6 +62,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -89,27 +97,46 @@ private val ITEMS = listOf(
     Triple(S.DISPLAY, "Display", "Change the screen brightness.")
 )
 
+private val ICONS = listOf(R.drawable.ic_media, R.drawable.ic_sketch, R.drawable.ic_games, R.drawable.ic_display)
+
 @Composable
 fun App() {
     var s by remember { mutableStateOf(S.MENU) }
     BackHandler(s != S.MENU) { s = S.MENU }
     Box(
-        Modifier.fillMaxSize().background(
-            Brush.verticalGradient(listOf(Color(0xFF2A82C6), Color(0xFF14529A), Color(0xFF0A2D6B)))
-        )
+        Modifier.fillMaxSize()
+            .background(
+                Brush.verticalGradient(
+                    listOf(Color(0xFF053078), Color(0xFF0A3F8C), Color(0xFF112D81), Color(0xFF010133))
+                )
+            )
+            .drawBehind {
+                drawRect(
+                    Brush.radialGradient(
+                        listOf(Color(0x6618A0F0), Color.Transparent),
+                        center = Offset(size.width * .2f, size.height * .45f), radius = size.width * .55f
+                    )
+                )
+                drawRect(
+                    Brush.radialGradient(
+                        listOf(Color(0x99081156), Color.Transparent),
+                        center = Offset(size.width, 0f), radius = size.width * .5f
+                    )
+                )
+            }
     ) {
         when (s) {
             S.MENU -> Menu { s = it }
             S.MEDIA -> Media()
             S.DISPLAY -> Display()
             S.SKETCH -> Sketch()
-            S.GAMES -> Snake()
+            S.GAMES -> Games()
         }
     }
 }
 
 @Composable
-fun Bar(text: String, on: Boolean, click: () -> Unit) {
+fun Bar(text: String, on: Boolean, icon: Int? = null, click: () -> Unit) {
     val colors = if (on) listOf(Color(0xFFFFD27A), Color(0xFFF6A31A), Color(0xFFFFBF4A))
     else listOf(Color.White, Color(0xFFCFE0F2), Color(0xFFE8F1FA))
     Box(
@@ -119,36 +146,53 @@ fun Bar(text: String, on: Boolean, click: () -> Unit) {
             .clickable { click() }
             .padding(horizontal = 16.dp),
         contentAlignment = Alignment.CenterStart
-    ) { Text(text, fontSize = 20.sp, color = Color(0xFF1B2230)) }
+    ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(text, Modifier.weight(1f), fontSize = 20.sp, color = Color(0xFF1B2230))
+            if (icon != null) Image(painterResource(icon), null, Modifier.size(30.dp))
+        }
+    }
 }
 
+// A list of bars. The orange highlight follows the selection (arrow keys or a tap).
+// A tap on another bar selects it; a tap on the selected bar (or Enter) opens it.
 @Composable
-fun Menu(go: (S) -> Unit) {
-    var i by remember { mutableIntStateOf(0) }
+fun Picker(items: List<Pair<String, Int?>>, footer: (Int) -> String = { "" }, onPick: (Int) -> Unit) {
+    var sel by remember { mutableIntStateOf(0) }
     val fr = remember { FocusRequester() }
+    val ls = rememberLazyListState()
     LaunchedEffect(Unit) { fr.requestFocus() }
+    LaunchedEffect(sel) { ls.animateScrollToItem(sel) }
     Box(
         Modifier.fillMaxSize().focusRequester(fr).focusable().onPreviewKeyEvent { e ->
             if (e.type != KeyEventType.KeyDown) false else when (e.key) {
-                Key.DirectionDown -> { i = (i + 1) % ITEMS.size; true }
-                Key.DirectionUp -> { i = (i + ITEMS.size - 1) % ITEMS.size; true }
-                Key.Enter, Key.NumPadEnter, Key.DirectionCenter -> { go(ITEMS[i].first); true }
+                Key.DirectionDown -> { sel = (sel + 1) % items.size; true }
+                Key.DirectionUp -> { sel = (sel + items.size - 1) % items.size; true }
+                Key.Enter, Key.NumPadEnter, Key.DirectionCenter -> { onPick(sel); true }
                 else -> false
             }
         }
     ) {
-        Text("MENU", Modifier.padding(32.dp), color = Color(0xFFE8F2FF), fontSize = 28.sp)
-        Row(Modifier.align(Alignment.Center).fillMaxWidth()) {
-            Spacer(Modifier.weight(.28f))
-            Column(Modifier.weight(.44f)) {
-                ITEMS.forEachIndexed { k, t -> Bar(t.second, k == i) { i = k; go(t.first) } }
+        LazyColumn(
+            Modifier.align(Alignment.Center).fillMaxWidth(.44f).fillMaxHeight(.7f),
+            state = ls, verticalArrangement = Arrangement.Center
+        ) {
+            itemsIndexed(items) { k, m ->
+                Bar(m.first, k == sel, m.second) { if (k == sel) onPick(k) else sel = k }
             }
-            Spacer(Modifier.weight(.28f))
         }
         Text(
-            ITEMS[i].third, Modifier.align(Alignment.BottomCenter).padding(bottom = 36.dp),
+            footer(sel), Modifier.align(Alignment.BottomCenter).padding(bottom = 36.dp),
             color = Color.White, fontSize = 18.sp
         )
+    }
+}
+
+@Composable
+fun Menu(go: (S) -> Unit) {
+    Box(Modifier.fillMaxSize()) {
+        Text("MENU", Modifier.padding(32.dp), color = Color(0xFFE8F2FF), fontSize = 28.sp)
+        Picker(ITEMS.mapIndexed { k, t -> Pair<String, Int?>(t.second, ICONS[k]) }, { ITEMS[it].third }) { go(ITEMS[it].first) }
     }
 }
 
@@ -180,10 +224,9 @@ fun Media() {
     BackHandler(mode != null) { mode = null }
     when {
         !ok -> Box(Modifier.fillMaxSize(), Alignment.Center) { Text("Allow access to photos and videos to continue.", color = Color.White, fontSize = 20.sp) }
-        mode == null -> Column(Modifier.fillMaxSize().padding(horizontal = 220.dp), Arrangement.Center) {
-            Bar("Photos", false) { mode = false }
-            Bar("Videos", false) { mode = true }
-        }
+        mode == null -> Picker(
+            listOf<Pair<String, Int?>>("Photos" to R.drawable.ic_media, "Videos" to R.drawable.ic_media)
+        ) { mode = it == 1 }
         else -> {
             val items = remember(mode) { queryMedia(ctx, mode == true) }
             if (items.isEmpty()) Box(Modifier.fillMaxSize(), Alignment.Center) { Text("Nothing here yet.", color = Color.White, fontSize = 20.sp) }
@@ -358,4 +401,70 @@ fun Snake() {
             color = Color.White, fontSize = 28.sp
         )
     }
+}
+
+// ---------- Games: Snake + HTML games (e.g. Scratch games packaged with TurboWarp) ----------
+class Entry(val label: String, val url: String?) // url == null means Snake
+
+private fun nice(f: String) = f.removeSuffix(".html").replace('_', ' ').replace('-', ' ')
+
+@Composable
+fun Games() {
+    val ctx = LocalContext.current
+    var rev by remember { mutableIntStateOf(0) }
+    val assetFiles = remember { (ctx.assets.list("games") ?: emptyArray()).filter { it.endsWith(".html") }.sorted() }
+    val userDir = remember { java.io.File(ctx.filesDir, "games").apply { mkdirs() } }
+    val userFiles = remember(rev) { userDir.listFiles()?.filter { it.name.endsWith(".html") }?.sortedBy { it.name } ?: emptyList() }
+    var play by remember { mutableStateOf<String?>(null) }
+    BackHandler(play != null) { play = null }
+
+    val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            val raw = ctx.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { if (it.moveToFirst()) it.getString(0) else null } ?: "game.html"
+            if (!raw.endsWith(".html", ignoreCase = true)) {
+                Toast.makeText(ctx, "Please pick an .html file", Toast.LENGTH_LONG).show()
+            } else {
+                val name = raw.substringBeforeLast('.').replace(Regex("[^A-Za-z0-9_-]"), "_") + ".html"
+                ctx.contentResolver.openInputStream(uri)?.use { i ->
+                    java.io.File(userDir, name).outputStream().use { o -> i.copyTo(o) }
+                }
+                rev++
+                Toast.makeText(ctx, "Added $name", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    val entries = listOf(Entry("Snake", null)) +
+        assetFiles.map { Entry(nice(it), "file:///android_asset/games/" + android.net.Uri.encode(it)) } +
+        userFiles.map { Entry(nice(it.name), android.net.Uri.fromFile(it).toString()) }
+
+    val cur = play
+    if (cur == null) {
+        Picker(
+            entries.map { Pair<String, Int?>(it.label, R.drawable.ic_games) } +
+                Pair<String, Int?>("+ Add game", null),
+            footer = { if (it == entries.size) "Pick an .html game from this tablet." else "" }
+        ) { k ->
+            if (k == entries.size) pick.launch(arrayOf("*/*"))
+            else play = entries[k].url ?: "snake"
+        }
+    } else if (cur == "snake") Snake() else GameView(cur)
+}
+
+@Composable
+fun GameView(url: String) {
+    AndroidView(
+        factory = { c ->
+            WebView(c).apply {
+                settings.javaScriptEnabled = true
+                settings.domStorageEnabled = true
+                settings.allowFileAccess = true
+                settings.mediaPlaybackRequiresUserGesture = false
+                loadUrl(url)
+                requestFocus()
+            }
+        },
+        modifier = Modifier.fillMaxSize()
+    )
 }
