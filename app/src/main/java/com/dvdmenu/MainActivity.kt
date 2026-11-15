@@ -15,6 +15,7 @@ import android.os.Bundle
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.util.Size as ASize
+import android.view.SurfaceView
 import android.view.ViewGroup
 import android.webkit.WebChromeClient
 import android.webkit.WebView
@@ -32,6 +33,9 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -65,12 +69,20 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
+import androidx.media3.common.C
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
+import androidx.media3.common.Player
+import androidx.media3.common.text.CueGroup
+import androidx.media3.exoplayer.ExoPlayer
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import kotlinx.coroutines.Dispatchers
@@ -91,16 +103,17 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-enum class S { MENU, MEDIA, DISPLAY, SKETCH, GAMES }
+enum class S { MENU, MEDIA, DISPLAY, SKETCH, GAMES, HELP }
 
 private val ITEMS = listOf(
     Triple(S.MEDIA, "Photos & Videos", "Browse your photos and videos."),
     Triple(S.SKETCH, "Sketch", "Draw something and save it."),
     Triple(S.GAMES, "Games", "Tiny games to pass the time."),
-    Triple(S.DISPLAY, "Display", "Change the screen brightness.")
+    Triple(S.DISPLAY, "Display", "Change the screen brightness."),
+    Triple(S.HELP, "Help", "Questions and answers about this app.")
 )
 
-private val ICONS = listOf(R.drawable.ic_media, R.drawable.ic_sketch, R.drawable.ic_games, R.drawable.ic_display)
+private val ICONS = listOf(R.drawable.ic_media, R.drawable.ic_sketch, R.drawable.ic_games, R.drawable.ic_display, R.drawable.ic_help)
 
 @Composable
 fun App() {
@@ -134,6 +147,7 @@ fun App() {
             S.DISPLAY -> Display()
             S.SKETCH -> Sketch()
             S.GAMES -> Games()
+            S.HELP -> Help()
         }
         if (s != S.MENU) {
             val dispatcher = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
@@ -234,6 +248,10 @@ fun Media() {
     LaunchedEffect(Unit) { if (!ok) ask.launch(perms) }
     var mode by remember { mutableStateOf<Boolean?>(null) }
     BackHandler(mode != null) { mode = null }
+    var watch by remember { mutableStateOf<Media?>(null) }
+    BackHandler(watch != null) { watch = null }
+    val w = watch
+    if (w != null) { VideoPlayer(w.uri); return }
     when {
         !ok -> Box(Modifier.fillMaxSize(), Alignment.Center) { Text("Allow access to photos and videos to continue.", color = Color.White, fontSize = 20.sp) }
         mode == null -> Picker(
@@ -245,25 +263,30 @@ fun Media() {
             else LazyVerticalGrid(
                 GridCells.Adaptive(150.dp), contentPadding = PaddingValues(16.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) { items(items) { Thumb(it) } }
+            ) {
+                items(items) { m ->
+                    Thumb(m) {
+                        if (m.video) watch = m
+                        else ctx.startActivity(
+                            Intent(Intent.ACTION_VIEW).setDataAndType(m.uri, "image/*")
+                                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        )
+                    }
+                }
+            }
         }
     }
 }
 
 @Composable
-fun Thumb(m: Media) {
+fun Thumb(m: Media, onClick: () -> Unit) {
     val ctx = LocalContext.current
     val bmp by produceState<Bitmap?>(null, m.uri) {
         value = withContext(Dispatchers.IO) { runCatching { ctx.contentResolver.loadThumbnail(m.uri, ASize(320, 240), null) }.getOrNull() }
     }
     Box(
         Modifier.fillMaxWidth().aspectRatio(4f / 3f).clip(RoundedCornerShape(4.dp)).background(Color(0x55000000))
-            .clickable {
-                ctx.startActivity(
-                    Intent(Intent.ACTION_VIEW).setDataAndType(m.uri, if (m.video) "video/*" else "image/*")
-                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                )
-            }
+            .clickable { onClick() }
     ) {
         bmp?.let { Image(it.asImageBitmap(), m.name, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
         if (m.video) Text("▶", Modifier.align(Alignment.Center), color = Color.White, fontSize = 30.sp)
@@ -532,4 +555,120 @@ fun GameView(url: String) {
         modifier = Modifier.fillMaxSize(),
         onRelease = { it.loadUrl("about:blank"); it.onPause(); it.destroy() }
     )
+}
+
+// ---------- Video player with .srt subtitles ----------
+@Composable
+fun Pill(t: String, click: () -> Unit) {
+    Box(
+        Modifier.clip(RoundedCornerShape(16.dp))
+            .background(Brush.verticalGradient(listOf(Color(0xFFFFD27A), Color(0xFFF6A31A))))
+            .clickable { click() }.padding(horizontal = 12.dp, vertical = 6.dp)
+    ) { Text(t, color = Color(0xFF201400), fontSize = 14.sp) }
+}
+
+private fun fmt(ms: Long): String { val s = ms / 1000; return "%d:%02d".format(s / 60, s % 60) }
+
+@Composable
+fun VideoPlayer(uri: android.net.Uri) {
+    val ctx = LocalContext.current
+    val view = LocalView.current
+    val player = remember { ExoPlayer.Builder(ctx).build() }
+    var playing by remember { mutableStateOf(true) }
+    var pos by remember { mutableLongStateOf(0L) }
+    var dur by remember { mutableLongStateOf(0L) }
+    var cue by remember { mutableStateOf("") }
+    var subsOn by remember { mutableStateOf(true) }
+    var hasSubs by remember { mutableStateOf(false) }
+    var showUi by remember { mutableStateOf(true) }
+
+    fun load(sub: android.net.Uri?) {
+        val b = MediaItem.Builder().setUri(uri)
+        if (sub != null) b.setSubtitleConfigurations(
+            listOf(
+                MediaItem.SubtitleConfiguration.Builder(sub)
+                    .setMimeType(MimeTypes.APPLICATION_SUBRIP).setLanguage("und")
+                    .setSelectionFlags(C.SELECTION_FLAG_DEFAULT).build()
+            )
+        )
+        player.setMediaItem(b.build(), if (sub != null) player.currentPosition else 0L)
+        player.prepare()
+        player.play()
+    }
+    val pickSub = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { u ->
+        if (u != null) { hasSubs = true; subsOn = true; load(u) }
+    }
+    DisposableEffect(player) {
+        val l = object : Player.Listener {
+            override fun onIsPlayingChanged(isPlaying: Boolean) { playing = isPlaying }
+            override fun onCues(cueGroup: CueGroup) {
+                cue = cueGroup.cues.joinToString("\n") { it.text?.toString() ?: "" }
+            }
+        }
+        player.addListener(l)
+        view.keepScreenOn = true
+        load(null)
+        onDispose { view.keepScreenOn = false; player.removeListener(l); player.release() }
+    }
+    LaunchedEffect(player) {
+        while (true) { pos = player.currentPosition; dur = player.duration.coerceAtLeast(0L); delay(300) }
+    }
+
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        AndroidView(factory = { c -> SurfaceView(c).also { player.setVideoSurfaceView(it) } }, modifier = Modifier.fillMaxSize())
+        Box(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { showUi = !showUi } })
+        if (subsOn && cue.isNotBlank()) Text(
+            cue.trim(),
+            Modifier.align(Alignment.BottomCenter).padding(bottom = if (showUi) 96.dp else 32.dp)
+                .background(Color(0x99000000)).padding(horizontal = 10.dp, vertical = 4.dp),
+            color = Color.White, fontSize = 22.sp, textAlign = TextAlign.Center
+        )
+        if (showUi) Row(
+            Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Color(0xAA000000))
+                .padding(start = 76.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Pill("-10") { player.seekTo((player.currentPosition - 10000).coerceAtLeast(0L)) }
+            Pill(if (playing) "Pause" else "Play") { if (player.isPlaying) player.pause() else player.play() }
+            Pill("+10") { player.seekTo(player.currentPosition + 10000) }
+            Text(fmt(pos), color = Color.White, fontSize = 14.sp)
+            Slider(if (dur > 0) pos.toFloat() / dur else 0f, { pos = (it * dur).toLong(); player.seekTo(pos) }, Modifier.weight(1f))
+            Text(fmt(dur), color = Color.White, fontSize = 14.sp)
+            Pill("CC") { pickSub.launch(arrayOf("*/*")) }
+            if (hasSubs) Pill(if (subsOn) "CC on" else "CC off") { subsOn = !subsOn }
+        }
+    }
+}
+
+// ---------- Help ----------
+private val FAQ = listOf(
+    "Add a game" to "Open Games and tap + Add game at the top right. Pick an .html file or a .zip from the tablet. A zip must contain an index.html (or another .html file). The game then shows up in the Games list.",
+    "Scratch games" to "Package your Scratch project with the TurboWarp Packager so it becomes a single .html file, then add it with + Add game. An .sb3 file will not work.",
+    "Game is black" to "First open the same file in Chrome. If it is blank there too, the game itself is broken. If you see a dark paused screen, tap anywhere to continue.",
+    "Going back" to "Tap the round back button at the bottom left, or use the Back button or Esc key. Each press goes back one step.",
+    "Watch videos" to "Open Photos & Videos, choose Videos, then tap a video. Tap the screen to show or hide the controls.",
+    "Subtitles (.srt)" to "While a video plays, tap CC and pick an .srt file from the tablet. Tap CC on / CC off to hide or show it. UTF-8 files work best, and the file is not picked up automatically.",
+    "Video won't play" to "Some formats are not supported by Android, mostly MKV files with AC3 or DTS sound. Try an MP4 file instead.",
+    "Sketch and save" to "Pick a colour, draw with your finger, then tap Save. Sketches are saved in Pictures/Sketches and also appear under Photos.",
+    "Brightness" to "Open Display and move the slider. It only changes the brightness while this app is open.",
+    "Make it home" to "Press the Home button, choose DVD Menu, then tap Always.",
+    "No photos shown" to "Allow photo and video access when the app asks. You can change it in Android Settings > Apps > DVD Menu > Permissions.",
+    "Controls" to "Arrow keys move the highlight and Enter opens it. With touch, tap a button to select it, then tap again to open it.",
+    "Remove a game" to "There is no delete button yet. Clearing the app's storage in Android Settings removes every game you added, but not your photos or sketches."
+)
+
+@Composable
+fun Help() {
+    var open by remember { mutableStateOf<Int?>(null) }
+    BackHandler(open != null) { open = null }
+    val o = open
+    if (o == null) Picker(FAQ.map { Pair<String, Int?>(it.first, null) }) { open = it }
+    else Column(
+        Modifier.fillMaxSize().padding(horizontal = 120.dp, vertical = 48.dp).verticalScroll(rememberScrollState())
+    ) {
+        Text(FAQ[o].first, color = Color(0xFFFFD27A), fontSize = 26.sp)
+        Spacer(Modifier.height(16.dp))
+        Text(FAQ[o].second, color = Color.White, fontSize = 20.sp, lineHeight = 30.sp)
+    }
 }
