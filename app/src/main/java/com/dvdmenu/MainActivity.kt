@@ -21,6 +21,7 @@ import android.webkit.WebView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -133,6 +134,15 @@ fun App() {
             S.DISPLAY -> Display()
             S.SKETCH -> Sketch()
             S.GAMES -> Games()
+        }
+        if (s != S.MENU) {
+            val dispatcher = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
+            Box(
+                Modifier.align(Alignment.BottomStart).padding(16.dp).size(44.dp)
+                    .clip(CircleShape).background(Color(0x99000000))
+                    .clickable { dispatcher?.onBackPressed() },
+                contentAlignment = Alignment.Center
+            ) { Text("◀", color = Color.White, fontSize = 18.sp) }
         }
     }
 }
@@ -405,10 +415,32 @@ fun Snake() {
     }
 }
 
-// ---------- Games: Snake + HTML games (e.g. Scratch games packaged with TurboWarp) ----------
+// ---------- Games: Snake + HTML games (single .html or a .zip with an index.html) ----------
 class Entry(val label: String, val url: String?) // url == null means Snake
 
 private fun nice(f: String) = f.removeSuffix(".html").replace('_', ' ').replace('-', ' ')
+
+private fun unzip(input: java.io.InputStream, dest: java.io.File) {
+    java.util.zip.ZipInputStream(input).use { z ->
+        var e = z.nextEntry
+        while (e != null) {
+            val out = java.io.File(dest, e.name)
+            if (out.canonicalPath.startsWith(dest.canonicalPath + java.io.File.separator)) {
+                if (e.isDirectory) out.mkdirs() else {
+                    out.parentFile?.mkdirs()
+                    out.outputStream().use { z.copyTo(it) }
+                }
+            }
+            e = z.nextEntry
+        }
+    }
+}
+
+private fun findIndex(dir: java.io.File): java.io.File? {
+    val htmls = dir.walkTopDown().filter { it.isFile && it.name.endsWith(".html", true) }.toList()
+    return htmls.filter { it.name.equals("index.html", true) }.minByOrNull { it.path.length }
+        ?: htmls.minByOrNull { it.path.length }
+}
 
 @Composable
 fun Games() {
@@ -416,7 +448,8 @@ fun Games() {
     var rev by remember { mutableIntStateOf(0) }
     val assetFiles = remember { (ctx.assets.list("games") ?: emptyArray()).filter { it.endsWith(".html") }.sorted() }
     val userDir = remember { java.io.File(ctx.filesDir, "games").apply { mkdirs() } }
-    val userFiles = remember(rev) { userDir.listFiles()?.filter { it.name.endsWith(".html") }?.sortedBy { it.name } ?: emptyList() }
+    val userFiles = remember(rev) { userDir.listFiles()?.filter { it.isFile && it.name.endsWith(".html") }?.sortedBy { it.name } ?: emptyList() }
+    val userDirs = remember(rev) { userDir.listFiles()?.filter { it.isDirectory }?.sortedBy { it.name } ?: emptyList() }
     var play by remember { mutableStateOf<String?>(null) }
     BackHandler(play != null) { play = null }
 
@@ -424,32 +457,51 @@ fun Games() {
         if (uri != null) {
             val raw = ctx.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
                 ?.use { if (it.moveToFirst()) it.getString(0) else null } ?: "game.html"
-            if (!raw.endsWith(".html", ignoreCase = true)) {
-                Toast.makeText(ctx, "Please pick an .html file", Toast.LENGTH_LONG).show()
-            } else {
-                val name = raw.substringBeforeLast('.').replace(Regex("[^A-Za-z0-9_-]"), "_") + ".html"
-                ctx.contentResolver.openInputStream(uri)?.use { i ->
-                    java.io.File(userDir, name).outputStream().use { o -> i.copyTo(o) }
-                }
-                rev++
-                Toast.makeText(ctx, "Added $name", Toast.LENGTH_SHORT).show()
+            val low = raw.lowercase()
+            val base = raw.substringBeforeLast('.').replace(Regex("[^A-Za-z0-9_-]"), "_")
+            try {
+                if (low.endsWith(".html")) {
+                    ctx.contentResolver.openInputStream(uri)?.use { i ->
+                        java.io.File(userDir, "$base.html").outputStream().use { o -> i.copyTo(o) }
+                    }
+                    rev++
+                    Toast.makeText(ctx, "Added $base", Toast.LENGTH_SHORT).show()
+                } else if (low.endsWith(".zip")) {
+                    val dir = java.io.File(userDir, base)
+                    dir.deleteRecursively(); dir.mkdirs()
+                    ctx.contentResolver.openInputStream(uri)?.use { unzip(it, dir) }
+                    if (findIndex(dir) == null) {
+                        dir.deleteRecursively()
+                        Toast.makeText(ctx, "No .html file found in that zip", Toast.LENGTH_LONG).show()
+                    } else {
+                        rev++
+                        Toast.makeText(ctx, "Added $base", Toast.LENGTH_SHORT).show()
+                    }
+                } else Toast.makeText(ctx, "Please pick an .html or .zip file", Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                Toast.makeText(ctx, "Could not add that file", Toast.LENGTH_LONG).show()
             }
         }
     }
 
     val entries = listOf(Entry("Snake", null)) +
         assetFiles.map { Entry(nice(it), "file:///android_asset/games/" + android.net.Uri.encode(it)) } +
-        userFiles.map { Entry(nice(it.name), android.net.Uri.fromFile(it).toString()) }
+        userFiles.map { Entry(nice(it.name), android.net.Uri.fromFile(it).toString()) } +
+        userDirs.mapNotNull { d -> findIndex(d)?.let { Entry(nice(d.name), android.net.Uri.fromFile(it).toString()) } }
 
     val cur = play
     if (cur == null) {
-        Picker(
-            entries.map { Pair<String, Int?>(it.label, R.drawable.ic_games) } +
-                Pair<String, Int?>("+ Add game", null),
-            footer = { if (it == entries.size) "Pick an .html game from this tablet." else "" }
-        ) { k ->
-            if (k == entries.size) pick.launch(arrayOf("*/*"))
-            else play = entries[k].url ?: "snake"
+        Box(Modifier.fillMaxSize()) {
+            Picker(entries.map { Pair<String, Int?>(it.label, R.drawable.ic_games) }) { k ->
+                play = entries[k].url ?: "snake"
+            }
+            Box(
+                Modifier.align(Alignment.TopEnd).padding(24.dp)
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(Brush.verticalGradient(listOf(Color(0xFFFFD27A), Color(0xFFF6A31A))))
+                    .clickable { pick.launch(arrayOf("*/*")) }
+                    .padding(horizontal = 16.dp, vertical = 10.dp)
+            ) { Text("+ Add game", color = Color(0xFF201400), fontSize = 16.sp) }
         }
     } else if (cur == "snake") Snake() else GameView(cur)
 }
@@ -468,6 +520,8 @@ fun GameView(url: String) {
                 settings.domStorageEnabled = true
                 settings.allowFileAccess = true
                 settings.allowContentAccess = true
+                settings.allowFileAccessFromFileURLs = true
+                settings.allowUniversalAccessFromFileURLs = true
                 settings.useWideViewPort = true
                 settings.loadWithOverviewMode = true
                 settings.mediaPlaybackRequiresUserGesture = false
@@ -475,8 +529,7 @@ fun GameView(url: String) {
                 requestFocus()
             }
         },
-        modifier = Modifier.fillMaxSize()
+        modifier = Modifier.fillMaxSize(),
+        onRelease = { it.loadUrl("about:blank"); it.onPause(); it.destroy() }
     )
 }
-
-                
