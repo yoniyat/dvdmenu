@@ -15,6 +15,8 @@ import android.os.Bundle
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.util.Size as ASize
+import android.view.ViewGroup
+import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -457,9 +459,17 @@ fun GameView(url: String) {
     AndroidView(
         factory = { c ->
             WebView(c).apply {
+                layoutParams = ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+                )
+                setBackgroundColor(android.graphics.Color.BLACK)
+                webChromeClient = WebChromeClient()
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
                 settings.allowFileAccess = true
+                settings.allowContentAccess = true
+                settings.useWideViewPort = true
+                settings.loadWithOverviewMode = true
                 settings.mediaPlaybackRequiresUserGesture = false
                 loadUrl(url)
                 requestFocus()
@@ -468,3 +478,5 @@ fun GameView(url: String) {
         modifier = Modifier.fillMaxSize()
     )
 }
+
+                
